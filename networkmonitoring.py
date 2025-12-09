@@ -1,48 +1,58 @@
 import time
 import socket
 import threading
-from ping3 import ping
-from rich.table import Table
-from rich.console import Console
-from rich.live import Live
-from datetime import datetime
+import os
 import ipaddress
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from typing import Dict, Optional, List
+
+from ping3 import ping
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.text import Text
+from rich.align import Align
+HOSTS_FILE = "hosts.txt"
+MAX_THREADS = 50  
+PING_INTERVAL = 1.0
+HISTORY_SIZE = 10
 
 class HostResult:
     """Stores the monitoring results for a single host."""
-
     def __init__(self, host: str, history_size: int = 10):
-        self.host: str = host
-        self.response: str = "unavailable"
-        self.history: deque = deque(maxlen=history_size)
-        self.avg_latency: float = 0.0
-        self.latency_change: str = ""
-        self.host_name: str = host
-        self.success_rate: float = 0.0
-        self.test_count: int = 0
-        self.last_update: datetime = datetime.now()
-        self.jitter: float = 0.0
+        self.host = host
+        self.response = "init..."
+        self.history = deque(maxlen=history_size)
+        self.avg_latency = 0.0
+        self.latency_change = ""
+        self.host_name = host 
+        self.success_rate = 0.0
+        self.test_count = 0
+        self.last_update = datetime.now()
+        self.jitter = 0.0
+        self.is_up = False
 
     def update(self, latency: Optional[float]):
-        """Updates the host result with the latest latency measurement."""
         self.test_count += 1
         self.last_update = datetime.now()
 
         if latency is None:
-            self.response = "unavailable"
+            self.response = "timeout"
             self.history.append(None)
+            self.is_up = False
         else:
-            latency_ms = latency * 1000  # Convert seconds to milliseconds
+            latency_ms = latency * 1000
             self.response = f"{latency_ms:.2f} ms"
             self.history.append(latency_ms)
+            self.is_up = True
 
         self.calculate_metrics()
 
     def calculate_metrics(self):
-        """Calculates average latency, jitter, success rate, and latency change."""
         non_none_history = [lat for lat in self.history if lat is not None]
 
         if non_none_history:
@@ -64,139 +74,162 @@ class HostResult:
             self.latency_change = "-"
 
 class NetworkMonitor:
-    """Monitors multiple hosts by continuously pinging them and displaying the results."""
-
-    def __init__(self, hosts_file: str = "hosts.txt", ping_interval: float = 1.0, history_size: int = 10):
-        self.hosts_file = hosts_file
-        self.ping_interval = ping_interval
-        self.history_size = history_size
+    def __init__(self):
         self.results: Dict[str, HostResult] = {}
         self.console = Console()
+        self.layout = Layout()
+        self._ensure_hosts_file()
         self._load_hosts()
 
-    def _load_hosts(self) -> List[str]:
-        """Loads and expands the list of hosts from the hosts file."""
+    def _ensure_hosts_file(self):
+        """Creates a dummy hosts.txt if it doesn't exist."""
+        if not os.path.exists(HOSTS_FILE):
+            with open(HOSTS_FILE, "w") as f:
+                f.write("8.8.8.8\n1.1.1.1\ngoogle.com\n# 192.168.1.1-192.168.1.5")
+            self.console.print(f"[yellow]Created default '{HOSTS_FILE}' file.[/]")
+
+    def _load_hosts(self):
         try:
-            with open(self.hosts_file, "r") as file:
-                raw_hosts = [line.strip() for line in file if line.strip()]
+            with open(HOSTS_FILE, "r") as file:
+                raw_hosts = [line.strip() for line in file if line.strip() and not line.startswith("#")]
+            
             expanded_hosts = self._expand_hosts(raw_hosts)
             for host in expanded_hosts:
-                self.results[host] = HostResult(host, self.history_size)
-            return expanded_hosts
-        except FileNotFoundError:
-            self.console.print(f"[bold red]Error:[/] '{self.hosts_file}' file not found.")
-            raise
+                if host not in self.results:
+                    self.results[host] = HostResult(host, HISTORY_SIZE)
+            
+            self.console.print(f"[green]Loaded {len(self.results)} hosts.[/]")
+        except Exception as e:
+            self.console.print(f"[bold red]Error loading hosts:[/] {e}")
 
     def _expand_hosts(self, hosts: List[str]) -> List[str]:
-        """Expands CIDR notations and IP ranges into individual IP addresses."""
         expanded = []
         for host in hosts:
             if '/' in host:
                 try:
                     network = ipaddress.IPv4Network(host, strict=False)
+                    if network.num_addresses > 256:
+                         self.console.print(f"[yellow]Skipping {host}: Too many IPs ({network.num_addresses}). Split into smaller chunks.[/]")
+                         continue
                     expanded.extend([str(ip) for ip in network.hosts()])
                 except ValueError:
-                    self.console.print(f"[yellow]Warning:[/] Invalid CIDR notation: {host}")
-            elif '-' in host:
+                    self.console.print(f"[yellow]Invalid CIDR: {host}[/]")
+            elif '-' in host: 
                 try:
-                    start_ip_str, end_ip_str = host.split('-')
-                    start_ip = ipaddress.IPv4Address(start_ip_str.strip())
-                    end_ip = ipaddress.IPv4Address(end_ip_str.strip())
-                    if start_ip > end_ip:
-                        self.console.print(f"[yellow]Warning:[/] Start IP {start_ip} is greater than end IP {end_ip}.")
+                    start, end = host.split('-')
+                    start_ip = ipaddress.IPv4Address(start.strip())
+                    end_ip = ipaddress.IPv4Address(end.strip())
+                    if int(end_ip) - int(start_ip) > 256:
+                        self.console.print(f"[yellow]Skipping range {host}: Too many IPs.[/]")
                         continue
-                    current_ip = start_ip
-                    while current_ip <= end_ip:
-                        expanded.append(str(current_ip))
-                        current_ip += 1
+                    current = start_ip
+                    while current <= end_ip:
+                        expanded.append(str(current))
+                        current += 1
                 except ValueError:
-                    self.console.print(f"[yellow]Warning:[/] Invalid IP range: {host}")
+                    self.console.print(f"[yellow]Invalid Range: {host}[/]")
             else:
                 expanded.append(host)
         return expanded
 
     def _resolve_hostname(self, host: str) -> str:
-        """Resolves the hostname for a given IP address."""
         try:
             return socket.gethostbyaddr(host)[0]
         except socket.herror:
             return host
 
     def _ping_host(self, host: str):
-        """Continuously pings a single host and updates its result."""
         host_result = self.results[host]
         host_result.host_name = self._resolve_hostname(host)
 
         while True:
             try:
                 latency = ping(host, timeout=2)
-            except Exception as e:
-                self.console.print(f"[red]Error pinging {host}: {e}[/]")
+            except PermissionError:
+                host_result.response = "PERM ERR"
+                time.sleep(5)
+                continue
+            except Exception:
                 latency = None
-
+            
             host_result.update(latency)
-            time.sleep(self.ping_interval)
+            time.sleep(PING_INTERVAL)
 
-    def _start_pinging(self, hosts: List[str]):
-        """Starts pinging all hosts using a thread pool."""
-        with ThreadPoolExecutor(max_workers=len(hosts)) as executor:
+    def _start_pinging(self):
+        hosts = list(self.results.keys())
+        workers = min(len(hosts), MAX_THREADS)
+        
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             for host in hosts:
                 executor.submit(self._ping_host, host)
 
-    def _create_table(self) -> Table:
-        """Creates a Rich table with the current monitoring results."""
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("#", justify="right")
-        table.add_column("Host")
-        table.add_column("Hostname")
-        table.add_column("Ping Response")
-        table.add_column("Average Latency")
-        table.add_column("Latency Change")
-        table.add_column("Success Rate")
-        table.add_column("Test Count")
-        table.add_column("Last Update")
-        table.add_column("Jitter")
+    def _generate_header(self) -> Panel:
+        """Generates the statistics header."""
+        total = len(self.results)
+        up = sum(1 for h in self.results.values() if h.is_up)
+        down = total - up
+        status_color = "green" if down == 0 else "red"
+        
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="center", ratio=1)
+        grid.add_column(justify="center", ratio=1)
+        grid.add_column(justify="center", ratio=1)
+        
+        grid.add_row(
+            f"[bold]Total Hosts:[/]\n{total}",
+            f"[bold green]Online:[/]\n{up}",
+            f"[bold red]Offline:[/]\n{down}"
+        )
+        
+        return Panel(grid, style=f"white on {status_color}" if down > 0 else "white on black", title="[bold]Network Status Monitor[/]", border_style=status_color)
 
-        for idx, host in enumerate(self.results.keys(), start=1):
-            result = self.results[host]
+    def _generate_table(self) -> Table:
+        table = Table(show_header=True, header_style="bold magenta", expand=True)
+        table.add_column("Host", style="cyan")
+        table.add_column("Hostname", style="dim white")
+        table.add_column("Status", justify="center")
+        table.add_column("Latency", justify="right")
+        table.add_column("Jitter", justify="right")
+        table.add_column("Success %", justify="right")
+        
+        for host, result in self.results.items():
+            status_style = "green" if result.is_up else "red"
+            status_icon = "●" if result.is_up else "○"
+            
             table.add_row(
-                str(idx),
-                result.host,
+                host,
                 result.host_name,
-                result.response,
-                f"{result.avg_latency:.2f} ms" if result.avg_latency else "N/A",
-                result.latency_change or "-",
-                f"{result.success_rate:.2f} %" if result.history else "0.00 %",
-                str(result.test_count),
-                result.last_update.strftime('%Y-%m-%d %H:%M:%S'),
-                f"{result.jitter:.2f} ms" if result.jitter else "0.00 ms"
+                f"[{status_style}]{status_icon} {result.response}[/]",
+                f"{result.avg_latency:.1f}ms {result.latency_change}",
+                f"{result.jitter:.1f}ms",
+                f"{result.success_rate:.0f}%"
             )
-
         return table
 
-    def display(self):
-        """Displays the live-updating table of monitoring results."""
-        with Live(self._create_table(), refresh_per_second=1, console=self.console) as live:
-            while True:
-                live.update(self._create_table())
-                time.sleep(1)
-
     def run(self):
-        """Runs the network monitor."""
-        try:
-            hosts = list(self.results.keys())
-            if not hosts:
-                self.console.print("[bold yellow]No hosts to monitor.[/]")
-                return
+        if not self.results:
+            self.console.print("[bold red]No hosts found to monitor.[/]")
+            return
 
-            threading.Thread(target=self._start_pinging, args=(hosts,), daemon=True).start()
-            self.display()
-        except KeyboardInterrupt:
-            self.console.print("\n[bold red]Monitoring stopped by user.[/]")
+        threading.Thread(target=self._start_pinging, daemon=True).start()
+        self.layout.split(
+            Layout(name="header", size=5),
+            Layout(name="body")
+        )
 
-def main():
-    monitor = NetworkMonitor(hosts_file="hosts.txt", ping_interval=1.0, history_size=10)
-    monitor.run()
+        with Live(self.layout, refresh_per_second=4, screen=True) as live:
+            while True:
+                self.layout["header"].update(self._generate_header())
+                self.layout["body"].update(Panel(self._generate_table(), title="Live Metrics", border_style="blue"))
+                time.sleep(0.25)
 
 if __name__ == "__main__":
-    main()
+    if os.name != 'nt' and os.geteuid() != 0:
+        print("\033[91mError: ICMP pings require root privileges. Run with sudo.\033[0m")
+        exit(1)
+        
+    try:
+        monitor = NetworkMonitor()
+        monitor.run()
+    except KeyboardInterrupt:
+        print("\nExiting...")
