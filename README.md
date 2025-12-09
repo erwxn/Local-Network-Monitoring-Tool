@@ -21,6 +21,7 @@ Designed for network administrators and enthusiasts, it utilizes **ICMP Echo Req
     * Standard IPs (e.g., `8.8.8.8`)
     * **CIDR Notation** (e.g., `192.168.1.0/24`)
     * **IP Ranges** (e.g., `192.168.1.10-192.168.1.50`)
+    * **URLs** (e.g., `https://www.youtube.com/watch?v=xvFZjo5PgG0&list=RDxvFZjo5PgG0&start_radio=1`)
 * **🏷️ Auto-Resolution:** Automatically resolves IP addresses to hostnames.
 
 ## 🛠️ Tech Stack
