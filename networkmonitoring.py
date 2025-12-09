@@ -93,11 +93,16 @@ class NetworkMonitor:
             with open(HOSTS_FILE, "r") as file:
                 raw_hosts = [line.strip() for line in file if line.strip() and not line.startswith("#")]
             
-            expanded_hosts = self._expand_hosts(raw_hosts)
+            cleaned_hosts = []
+            for h in raw_hosts:
+                h = h.replace("https://", "").replace("http://", "")
+                h = h.split("/")[0]
+                cleaned_hosts.append(h)
+
+            expanded_hosts = self._expand_hosts(cleaned_hosts)
             for host in expanded_hosts:
                 if host not in self.results:
                     self.results[host] = HostResult(host, HISTORY_SIZE)
-            
             self.console.print(f"[green]Loaded {len(self.results)} hosts.[/]")
         except Exception as e:
             self.console.print(f"[bold red]Error loading hosts:[/] {e}")
