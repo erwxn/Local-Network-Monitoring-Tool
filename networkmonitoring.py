@@ -185,8 +185,13 @@ class NetworkMonitor:
             f"[bold green]Online:[/]\n{up}",
             f"[bold red]Offline:[/]\n{down}"
         )
-        
-        return Panel(grid, style=f"white on {status_color}" if down > 0 else "white on black", title="[bold]Network Status Monitor[/]", border_style=status_color)
+        return Panel(
+            grid, 
+            style=f"white on {status_color}" if down > 0 else "white on black", 
+            title="[bold]Network Status Monitor[/]", 
+            subtitle="[bold cyan]Dev: Rayane/Erwxn[/]",
+            border_style=status_color
+        )
 
     def _generate_table(self) -> Table:
         table = Table(show_header=True, header_style="bold magenta", expand=True)
